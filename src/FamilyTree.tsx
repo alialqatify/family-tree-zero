@@ -2044,7 +2044,7 @@ export default function FamilyTree() {
         {/* Floating selected-person card */}
         {selectedPerson && (
           <div
-            className="absolute bottom-4 right-4 z-30 w-[300px] max-w-[calc(100%-32px)]"
+            className="absolute bottom-4 right-4 z-30 w-[320px] max-w-[calc(100%-32px)]"
             onClick={(event) =>
               event.stopPropagation()
             }
@@ -2052,30 +2052,70 @@ export default function FamilyTree() {
             <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-100 flex items-start justify-between">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                    <UserRound className="w-5 h-5" />
-                  </div>
+                  {/* صورة الشخص */}
+                  {selectedPerson.person.photo_url ? (
+                    <img
+                      src={selectedPerson.person.photo_url}
+                      alt={personName(selectedPerson.person)}
+                      className="w-12 h-12 rounded-full object-cover border border-slate-200"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                      <UserRound className="w-6 h-6" />
+                    </div>
+                  )}
 
                   <div className="min-w-0">
-                    <h2 className="font-bold text-slate-800 truncate">
-                      {personName(
-                        selectedPerson.person,
-                      )}
+                    <h2 className="font-bold text-slate-800 truncate text-lg">
+                      {personName(selectedPerson.person)}
                     </h2>
 
-                    <p className="text-xs text-slate-500">
-                      {isFemale(
-                        selectedPerson.person,
-                      )
-                        ? 'أنثى'
-                        : 'ذكر'}
+                    {/* الحالة + النوع */}
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <p className="text-xs text-slate-500">
+                        {isFemale(selectedPerson.person) ? 'أنثى' : 'ذكر'}
+                        {selectedPerson.person.family_title ? ` • ${selectedPerson.person.family_title}` : ''}
+                      </p>
 
-                      {selectedPerson
-                        .person
-                        .family_title
-                        ? ` • ${selectedPerson.person.family_title}`
-                        : ''}
-                    </p>
+                      {selectedPerson.person.life_status && (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                          selectedPerson.person.life_status === 'حي' ? 'bg-green-100 text-green-700' :
+                          selectedPerson.person.life_status === 'متوفى' ? 'bg-slate-200 text-slate-600' :
+                          selectedPerson.person.life_status === 'شهيد' ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>
+                          {selectedPerson.person.life_status}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* المعرف القصير مع زر نسخ */}
+                    {selectedPerson.person.display_id && (
+                      <div className="flex items-center gap-1 mt-1">
+                        <span className="text-[10px] text-slate-400 font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200">
+                          #{selectedPerson.person.display_id}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (selectedPerson.person.display_id) {
+                              navigator.clipboard?.writeText(selectedPerson.person.display_id)
+                                .then(() => {
+                                  // يمكن إضافة إشعار قصير هنا
+                                })
+                                .catch(() => {});
+                            }
+                          }}
+                          className="text-slate-400 hover:text-slate-600 transition-colors"
+                          title="نسخ المعرف"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
