@@ -699,17 +699,34 @@ export default function FamilyTree() {
   );
 
   /* =======================================================
-     حساب الخطوط المخصصة (بديل عن renderCustomLinkElement)
+     حساب عدد الذرية من الشجرة الكاملة (مرة واحدة)
+  ======================================================= */
+
+  const descendantCountMap = useMemo(() => {
+    const map = new Map<string, number>();
+
+    const countAndFill = (node: TreeNode): number => {
+      let count = node.children.length;
+      for (const child of node.children) {
+        count += countAndFill(child);
+      }
+      map.set(node.attributes.id, count);
+      return count;
+    };
+
+    for (const root of treeData) {
+      countAndFill(root);
+    }
+
+    return map;
+  }, [treeData]);
+
+  /* =======================================================
+     حساب الخطوط المخصصة (تستخدم descendantCountMap)
   ======================================================= */
 
   const customLinks = useMemo(() => {
     if (!visibleData.length) return [];
-
-    const countDescendants = (node: TreeNode): number => {
-      let c = node.children.length;
-      for (const ch of node.children) c += countDescendants(ch);
-      return c;
-    };
 
     const links: { path: string; strokeWidth: number }[] = [];
 
@@ -725,7 +742,7 @@ export default function FamilyTree() {
       root.descendants().forEach((n) => { n.y = n.depth * DEPTH_FACTOR; });
 
       for (const link of root.links()) {
-        const descendants = countDescendants(link.target.data);
+        const descendants = descendantCountMap.get(link.target.data.attributes.id) ?? 0;
         const strokeWidth = Math.min(14, Math.max(2, 2 + Math.sqrt(descendants) * 1.3));
         const sx = link.source.x!, sy = link.source.y!;
         const tx = link.target.x!, ty = link.target.y!;
@@ -739,7 +756,7 @@ export default function FamilyTree() {
     }
 
     return links;
-  }, [visibleData]);
+  }, [visibleData, descendantCountMap]);
 
   /* =======================================================
      Search
