@@ -841,7 +841,7 @@ export default function FamilyTree() {
   }, []);
 
   /* =======================================================
-     Main tree update - FIXED: receives zoom AND translate
+     Main tree update - Fixed: receives zoom AND translate
   ======================================================= */
 
   const handleUpdate = useCallback(
@@ -892,7 +892,7 @@ export default function FamilyTree() {
   }, [selectedPerson, people, marriages, childrenLinks, personMap]);
 
   /* =======================================================
-     Main tree custom node
+     Main tree custom node (LEAF SHAPE)
   ======================================================= */
 
   const renderNode = useCallback(
@@ -1020,6 +1020,11 @@ export default function FamilyTree() {
       const rectWidth = Math.max(nameWidth, titleWidth, 100);
       const rectHeight = title ? 46 : 32;
 
+      // Leaf shape path
+      const leafW = rectWidth * 1.3;
+      const leafH = rectHeight * 1.7;
+      const leafPath = `M${-leafW / 2},0 Q0,${-leafH / 2} ${leafW / 2},0 Q0,${leafH / 2} ${-leafW / 2},0 Z`;
+
       return (
         <g
           data-person-id={id}
@@ -1054,13 +1059,10 @@ export default function FamilyTree() {
             />
           )}
 
-          <rect
-            x={-rectWidth / 2}
-            y={-rectHeight / 2}
-            width={rectWidth}
-            height={rectHeight}
-            rx={7}
-            fill={finalColor ? `${finalColor}22` : '#ffffff'}
+          {/* Leaf-shaped background */}
+          <path
+            d={leafPath}
+            fill={finalColor ? `${finalColor}33` : 'rgba(134, 239, 172, 0.28)'}
             stroke={
               isHighlighted
                 ? '#eab308'
@@ -1068,29 +1070,18 @@ export default function FamilyTree() {
                 ? '#64748b'
                 : finalColor
                 ? finalColor
-                : '#cbd5e1'
+                : '#4ade80'
             }
             strokeWidth={
-              isHighlighted || isSelected ? 2 : finalColor ? 2 : 1
+              isHighlighted || isSelected ? 2 : finalColor ? 2 : 1.3
             }
           />
-
-          {finalColor && (
-            <rect
-              x={-rectWidth / 2}
-              y={-rectHeight / 2}
-              width={rectWidth}
-              height={4}
-              rx={2}
-              fill={finalColor}
-            />
-          )}
 
           <text
             x="0"
             y={title ? -7 : 5}
             textAnchor="middle"
-            fill="#1e293b"
+            fill="#1e3a8a"
             fontSize="16"
             fontWeight="600"
             style={{ fontFamily: 'Cairo, sans-serif' }}
@@ -1644,9 +1635,10 @@ export default function FamilyTree() {
       >
         {dimensions.width > 0 && visibleData.length > 0 && (
           <>
-            {/* طبقة الخطوط المخصصة (تحت) */}
+            {/* طبقة الخطوط المخصصة (تحت) - z-index 10 */}
             <svg
               className="absolute inset-0 pointer-events-none"
+              style={{ zIndex: 10 }}
               width={dimensions.width}
               height={dimensions.height}
             >
@@ -1679,31 +1671,33 @@ export default function FamilyTree() {
               }
             `}</style>
 
-            {/* شجرة المكتبة (فوق) */}
-            <Tree
-              key={treeKey}
-              data={visibleData}
-              orientation="vertical"
-              pathFunc="diagonal"
-              collapsible={false}
-              depthFactor={DEPTH_FACTOR}
-              nodeSize={NODE_SIZE}
-              separation={SEPARATION}
-              dimensions={dimensions}
-              zoomable
-              scaleExtent={{ min: 0.1, max: 5 }}
-              translate={translate}
-              zoom={zoom}
-              renderCustomNodeElement={renderNode}
-              transitionDuration={300}
-              onUpdate={handleUpdate}
-            />
+            {/* شجرة المكتبة (فوق) - z-index 20 */}
+            <div className="absolute inset-0" style={{ zIndex: 20 }}>
+              <Tree
+                key={treeKey}
+                data={visibleData}
+                orientation="vertical"
+                pathFunc="diagonal"
+                collapsible={false}
+                depthFactor={DEPTH_FACTOR}
+                nodeSize={NODE_SIZE}
+                separation={SEPARATION}
+                dimensions={dimensions}
+                zoomable
+                scaleExtent={{ min: 0.1, max: 5 }}
+                translate={translate}
+                zoom={zoom}
+                renderCustomNodeElement={renderNode}
+                transitionDuration={300}
+                onUpdate={handleUpdate}
+              />
+            </div>
           </>
         )}
 
         {/* الشريط الجانبي للأخوات والخالات */}
         {selectedPerson && (
-          <div className="absolute top-4 left-4 z-20 bg-white rounded-xl shadow-lg border border-slate-200 p-3 max-w-[240px] min-w-[200px] max-h-[70vh] overflow-y-auto">
+          <div className="absolute top-4 left-4 z-30 bg-white rounded-xl shadow-lg border border-slate-200 p-3 max-w-[240px] min-w-[200px] max-h-[70vh] overflow-y-auto">
             {/* قسم الأخوات */}
             <div className="mb-3">
               <div className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-2">
