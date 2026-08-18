@@ -892,7 +892,7 @@ export default function FamilyTree() {
   }, [selectedPerson, people, marriages, childrenLinks, personMap]);
 
   /* =======================================================
-     Main tree custom node (LEAF SHAPE)
+     Main tree custom node (LEAF SHAPE with className)
   ======================================================= */
 
   const renderNode = useCallback(
@@ -1059,8 +1059,9 @@ export default function FamilyTree() {
             />
           )}
 
-          {/* Leaf-shaped background */}
+          {/* Leaf-shaped background with special className */}
           <path
+            className="leaf-node-shape"
             d={leafPath}
             fill={finalColor ? `${finalColor}33` : 'rgba(134, 239, 172, 0.28)'}
             stroke={
@@ -1657,14 +1658,9 @@ export default function FamilyTree() {
               </g>
             </svg>
 
-            {/* إخفاء خطوط المكتبة الافتراضية */}
+            {/* إخفاء خطوط المكتبة الافتراضية فقط (تستثني .leaf-node-shape) */}
             <style>{`
-              .rd3t-tree-container svg path {
-                stroke: transparent !important;
-                stroke-width: 0 !important;
-                opacity: 0 !important;
-              }
-              .rd3t-tree-container svg g:first-child path {
+              .rd3t-tree-container svg path:not(.leaf-node-shape) {
                 stroke: transparent !important;
                 stroke-width: 0 !important;
                 opacity: 0 !important;
