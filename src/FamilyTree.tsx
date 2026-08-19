@@ -14,7 +14,7 @@ import {
 import { supabase } from '@/lib/supabase';
 
 /* =========================================================
-   Types (نفس السابق مع إضافة Contour)
+   Types
 ========================================================= */
 
 interface Person {
@@ -91,24 +91,19 @@ interface LayoutPosition {
 
 interface LayoutOptions {
   levelHeight?: number;
-  nodeGap?: number;          // المسافة الأفقية بين الفروع (تم استبدال siblingGap)
-  verticalJitter?: number;   // الإزاحة العمودية العشوائية
+  nodeWidth?: number;
+  nodeHeight?: number;
+  minNodeGap?: number;
 }
 
 interface InternalNode {
   node: TreeNode;
   id: string;
   children: InternalNode[];
-  descendants: number;
   x: number;
   y: number;
-  left: number;
-  right: number;
-}
-
-interface Contour {
-  left: number[];
-  right: number[];
+  baseY: number; // الإحداثي الأساسي للجيل
+  depth: number;
 }
 
 /* =========================================================
@@ -161,10 +156,6 @@ function generateColor(index: number): string {
   return colors[index % colors.length];
 }
 
-/* ------------------------------------------
-   دوال خاصة بالأم والأخوات والخالات (نفس السابق)
------------------------------------------- */
-
 function getMother(
   person: Person,
   marriages: Marriage[],
@@ -195,13 +186,11 @@ function getChildrenOfPerson(
   personMap: Map<string, Person>
 ): Person[] {
   const children: Person[] = [];
-
   for (const p of allPeople) {
     if (p.father_id === person.id) {
       children.push(p);
     }
   }
-
   const personMarriages = marriages.filter(
     (m) => m.husband_id === person.id || m.wife_id === person.id
   );
@@ -214,7 +203,6 @@ function getChildrenOfPerson(
       if (child) children.push(child);
     }
   }
-
   return uniquePeople(children);
 }
 
@@ -226,14 +214,12 @@ function getSisters(
   personMap: Map<string, Person>
 ): { sister: Person; color: string; children: Person[] }[] {
   if (!person.father_id) return [];
-
   const sisters = allPeople.filter(
     (p) =>
       p.father_id === person.father_id &&
       isFemale(p) &&
       p.id !== person.id
   );
-
   return sisters.map((sister, index) => ({
     sister,
     color: generateColor(index + 100),
@@ -286,185 +272,121 @@ function isPersonInFamily(
 }
 
 /* =========================================================
-   Layout Helpers (Contour-Packed مع فحص التداخل الفعلي)
+   Layout Engine: الهروب للأعلى لمنع التداخل والأفقية الزائدة
 ========================================================= */
-
-function hashToUnit(id: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < id.length; i++) {
-    h ^= id.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return ((h >>> 0) % 10000) / 10000;
-}
-
-function moveSubtree(node: InternalNode, dx: number): void {
-  node.x += dx;
-  node.left += dx;
-  node.right += dx;
-  for (const child of node.children) {
-    moveSubtree(child, dx);
-  }
-}
 
 function computeOrganicLayout(
   roots: TreeNode[],
   options: LayoutOptions = {}
 ): Map<string, LayoutPosition> {
   const {
-    levelHeight = 150,
-    nodeGap = 100, // زيادة الفجوة لمنع التداخل
-    verticalJitter = 25,
+    levelHeight = 160,
+    nodeWidth = 140,
+    nodeHeight = 60,
+    minNodeGap = 20,
   } = options;
 
   const result = new Map<string, LayoutPosition>();
-
   if (roots.length === 0) return result;
 
-  // 1. بناء الهيكل الداخلي
-  function build(node: TreeNode, depth: number): InternalNode {
-    const children = (node.children || []).map((c) => build(c, depth + 1));
-    let descendants = 1;
-    for (const child of children) descendants += child.descendants;
-
-    const verticalOffset =
-      depth === 0
-        ? 0
-        : (hashToUnit(node.attributes.id) - 0.5) * verticalJitter * 2;
-
+  // 1. بناء الهيكل الشجري الداخلي
+  function buildInternal(node: TreeNode, depth: number): InternalNode {
+    const children = (node.children || []).map((c) => buildInternal(c, depth + 1));
+    const baseY = -depth * levelHeight;
     return {
       node,
       id: node.attributes.id,
       children,
-      descendants,
       x: 0,
-      y: -depth * levelHeight + verticalOffset,
-      left: 0,
-      right: 0,
+      y: baseY,
+      baseY,
+      depth,
     };
   }
 
-  // 2. حساب المسار الخارجي (Contour) لمنع التداخل
-  function computeContour(node: InternalNode): Contour {
-    let left = [node.x];
-    let right = [node.x];
-    for (const child of node.children) {
-      const childContour = computeContour(child);
-      for (let i = 0; i < childContour.left.length; i++) {
-        const depthIdx = i + 1;
-        if (left[depthIdx] === undefined) {
-          left[depthIdx] = childContour.left[i];
-          right[depthIdx] = childContour.right[i];
-        } else {
-          left[depthIdx] = Math.min(left[depthIdx], childContour.left[i]);
-          right[depthIdx] = Math.max(right[depthIdx], childContour.right[i]);
-        }
-      }
-    }
-    return { left, right };
-  }
-
-  // 3. ترتيب الفروع وتطبيق قانون التنافر عند أي تداخل
-  function layoutSubtree(node: InternalNode): Contour {
+  // 2. الحساب المبدئي لمواقع x مع الموازنة
+  function computeInitialX(node: InternalNode): number {
     if (node.children.length === 0) {
-      node.x = 0;
-      node.left = 0;
-      node.right = 0;
-      return { left: [0], right: [0] };
+      return nodeWidth + minNodeGap;
+    }
+    let totalSpan = 0;
+    const childSpans: number[] = [];
+    for (const child of node.children) {
+      const span = computeInitialX(child);
+      childSpans.push(span);
+      totalSpan += span;
     }
 
-    const childContours: Contour[] = [];
-
+    let currentX = -totalSpan / 2;
     for (let i = 0; i < node.children.length; i++) {
       const child = node.children[i];
-      const contour = layoutSubtree(child);
-
-      if (i > 0) {
-        let maxShift = 0;
-        const prevContour = childContours[i - 1];
-        const minDepth = Math.min(prevContour.right.length, contour.left.length);
-
-        for (let d = 0; d < minDepth; d++) {
-          const overlap = prevContour.right[d] - contour.left[d] + nodeGap;
-          if (overlap > maxShift) {
-            maxShift = overlap;
-          }
-        }
-
-        if (maxShift > 0) {
-          moveSubtree(child, maxShift);
-          for (let d = 0; d < contour.left.length; d++) {
-            contour.left[d] += maxShift;
-            contour.right[d] += maxShift;
-          }
-        }
-      }
-
-      childContours.push(contour);
+      const span = childSpans[i];
+      const childCenterX = currentX + span / 2;
+      shiftSubtreeX(child, childCenterX);
+      currentX += span;
     }
 
-    // وضع الأب في منتصف أبنائه
-    const firstChild = node.children[0];
-    const lastChild = node.children[node.children.length - 1];
-    const childrenCenter = (firstChild.x + lastChild.x) / 2;
-    node.x = childrenCenter;
-
-    // تجميع الكونتور النهائي للفرع الحالي
-    const currentContour: Contour = {
-      left: [node.x],
-      right: [node.x],
-    };
-
-    for (const c of childContours) {
-      for (let d = 0; d < c.left.length; d++) {
-        const depthIdx = d + 1;
-        if (currentContour.left[depthIdx] === undefined) {
-          currentContour.left[depthIdx] = c.left[d];
-          currentContour.right[depthIdx] = c.right[d];
-        } else {
-          currentContour.left[depthIdx] = Math.min(
-            currentContour.left[depthIdx],
-            c.left[d]
-          );
-          currentContour.right[depthIdx] = Math.max(
-            currentContour.right[depthIdx],
-            c.right[d]
-          );
-        }
-      }
-    }
-
-    return currentContour;
+    node.x = 0; // الأب في المنتصف بالنسبة لأبنائه
+    return totalSpan;
   }
 
-  // 4. تنفيذ التخطيط لكل جذور الأشجار
-  const trees = roots.map((root) => build(root, 0));
-  let globalX = 0;
-
-  for (const tree of trees) {
-    const contour = layoutSubtree(tree);
-    const minLeft = Math.min(...contour.left);
-    if (minLeft < globalX) {
-      const shift = globalX - minLeft;
-      moveSubtree(tree, shift);
-      for (let i = 0; i < contour.right.length; i++) {
-        contour.right[i] += shift;
-      }
-    }
-    const maxRight = Math.max(...contour.right);
-    globalX = maxRight + nodeGap * 2;
-  }
-
-  // 5. استخراج الإحداثيات النهائية
-  function exportPositions(node: InternalNode) {
-    result.set(node.id, { x: node.x, y: node.y });
+  function shiftSubtreeX(node: InternalNode, dx: number) {
+    node.x += dx;
     for (const child of node.children) {
-      exportPositions(child);
+      shiftSubtreeX(child, dx);
     }
   }
 
-  for (const tree of trees) {
-    exportPositions(tree);
+  // 3. منع التداخل الرأسي والأفقي عبر الضبط العمودي (Staggering / Vertical Escape)
+  const allNodesList: InternalNode[] = [];
+  function collectNodes(node: InternalNode) {
+    allNodesList.push(node);
+    for (const child of node.children) {
+      collectNodes(child);
+    }
+  }
+
+  const internalRoots = roots.map((r) => buildInternal(r, 0));
+  let currentRootX = 0;
+
+  for (const root of internalRoots) {
+    const rootSpan = computeInitialX(root);
+    shiftSubtreeX(root, currentRootX + rootSpan / 2);
+    currentRootX += rootSpan + minNodeGap * 2;
+    collectNodes(root);
+  }
+
+  // تجميع العقد حسب الجيل (Depth) لحل التزاحم
+  const nodesByDepth = new Map<number, InternalNode[]>();
+  for (const n of allNodesList) {
+    const list = nodesByDepth.get(n.depth) || [];
+    list.push(n);
+    nodesByDepth.set(n.depth, list);
+  }
+
+  // إزاحة العقد رأسيًا (للأعلى والأسفل) إذا اقتربت جدًا أفقياً
+  nodesByDepth.forEach((nodesInDepth) => {
+    // ترتيب العقد حسب x
+    nodesInDepth.sort((a, b) => a.x - b.x);
+
+    for (let i = 0; i < nodesInDepth.length - 1; i++) {
+      const curr = nodesInDepth[i];
+      const next = nodesInDepth[i + 1];
+
+      const xOverlap = (curr.x + nodeWidth / 2) - (next.x - nodeWidth / 2);
+
+      // إذا كانت العقدتان متقاربتين جداً أفقياً، ارفع العقدة المجاورة للأعلى
+      if (xOverlap > -minNodeGap) {
+        // دفع العقدة رأسيًا للأعلى (أو بالتناوب)
+        const staggerStep = (i % 2 === 0 ? -1 : 1) * (nodeHeight * 0.75);
+        next.y = next.baseY + staggerStep;
+      }
+    }
+  });
+
+  // 4. استخراج المواقع النهائية
+  for (const n of allNodesList) {
+    result.set(n.id, { x: n.x, y: n.y });
   }
 
   return result;
@@ -477,7 +399,7 @@ function computeOrganicLayout(
 function computeFitZoom(
   positions: Map<string, LayoutPosition>,
   viewportW: number,
-  viewportH: number,
+  viewportH: number
 ) {
   if (positions.size === 0 || viewportW <= 0 || viewportH <= 0) {
     return { zoom: 1, translate: { x: viewportW / 2 || 300, y: 60 } };
@@ -492,27 +414,20 @@ function computeFitZoom(
     minY = Math.min(minY, p.y);
     maxY = Math.max(maxY, p.y);
   }
-  const treeW = maxX - minX + 200;
-  const treeH = maxY - minY + 200;
+  const treeW = maxX - minX + 240;
+  const treeH = maxY - minY + 240;
   const fitZoom = Math.min(viewportW / treeW, viewportH / treeH, 1.2);
   const clampedZoom = Math.max(0.15, fitZoom);
   return {
     zoom: clampedZoom,
     translate: {
       x: viewportW / 2 - ((minX + maxX) / 2) * clampedZoom,
-      y: 60 - minY * clampedZoom,
+      y: 80 - minY * clampedZoom,
     },
   };
 }
 
-/* =========================================================
-   Main tree helpers
-========================================================= */
-
-function findPath(
-  roots: TreeNode[],
-  targetId: string,
-): string[] | null {
+function findPath(roots: TreeNode[], targetId: string): string[] | null {
   const dfs = (node: TreeNode, path: string[]): string[] | null => {
     if (node.attributes.id === targetId) {
       return [...path, node.attributes.id];
@@ -532,7 +447,7 @@ function findPath(
 
 function buildVisibleData(
   roots: TreeNode[],
-  collapsedIds: Set<string>,
+  collapsedIds: Set<string>
 ): TreeNode[] {
   const clone = (node: TreeNode): TreeNode => ({
     ...node,
@@ -582,7 +497,6 @@ export default function FamilyTree() {
   const [radialOpen, setRadialOpen] = useState(false);
   const [radialRoot, setRadialRoot] = useState<RadialNode | null>(null);
 
-  // حالات السحب وال pinch
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const pinchRef = useRef<{ dist: number; zoom: number } | null>(null);
@@ -591,10 +505,7 @@ export default function FamilyTree() {
   const containerRef = useRef<HTMLDivElement>(null);
   const currentZoomRef = useRef(1);
 
-  /* =======================================================
-     Load all data
-  ======================================================= */
-
+  /* Load Data */
   useEffect(() => {
     let cancelled = false;
     const fetchData = async () => {
@@ -603,44 +514,17 @@ export default function FamilyTree() {
 
       const [peopleResult, marriagesResult, childrenResult] = await Promise.all([
         supabase.from('people').select(`
-            id,
-            display_id,
-            full_name,
-            family_title,
-            gender,
-            father_id,
-            is_external,
-            life_status,
-            phone_number,
-            photo_url,
-            family_origin_id
+            id, display_id, full_name, family_title, gender, father_id,
+            is_external, life_status, phone_number, photo_url, family_origin_id
           `),
-        supabase.from('marriages').select(`
-            marriage_id,
-            husband_id,
-            wife_id,
-            status
-          `),
-        supabase.from('children_link').select(`
-            child_id,
-            marriage_id
-          `),
+        supabase.from('marriages').select(`marriage_id, husband_id, wife_id, status`),
+        supabase.from('children_link').select(`child_id, marriage_id`),
       ]);
 
       if (cancelled) return;
 
-      if (peopleResult.error) {
-        setErrorMsg(`فشل تحميل الأشخاص: ${peopleResult.error.message}`);
-        setLoadState('error');
-        return;
-      }
-      if (marriagesResult.error) {
-        setErrorMsg(`فشل تحميل الزيجات: ${marriagesResult.error.message}`);
-        setLoadState('error');
-        return;
-      }
-      if (childrenResult.error) {
-        setErrorMsg(`فشل تحميل علاقات الأبناء: ${childrenResult.error.message}`);
+      if (peopleResult.error || marriagesResult.error || childrenResult.error) {
+        setErrorMsg('فشل تحميل البيانات من السيرفر');
         setLoadState('error');
         return;
       }
@@ -703,36 +587,23 @@ export default function FamilyTree() {
     };
   }, []);
 
-  /* =======================================================
-     Dimensions (مع ResizeObserver)
-  ======================================================= */
-
+  /* Resize Observer */
   useEffect(() => {
     if (!containerRef.current) return;
-
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          setDimensions({ width, height });
-        }
+        if (width > 0 && height > 0) setDimensions({ width, height });
       }
     });
-
     observer.observe(containerRef.current);
-
-    return () => {
-      observer.disconnect();
-    };
+    return () => observer.disconnect();
   }, [loadState]);
 
-  /* =======================================================
-     ESC handlers
-  ======================================================= */
-
+  /* ESC key */
   useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
       setSelectedPerson(null);
       setRelationOpen(false);
       setRadialOpen(false);
@@ -746,15 +617,10 @@ export default function FamilyTree() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  /* =======================================================
-     Maps
-  ======================================================= */
-
+  /* Maps */
   const personMap = useMemo(() => {
     const map = new Map<string, Person>();
-    for (const person of people) {
-      map.set(person.id, person);
-    }
+    for (const person of people) map.set(person.id, person);
     return map;
   }, [people]);
 
@@ -787,36 +653,20 @@ export default function FamilyTree() {
     return map;
   }, [childrenLinks, personMap]);
 
-  /* =======================================================
-     Relationship helpers
-  ======================================================= */
-
+  /* Relationships */
   const getSpousesWithMarriage = useCallback(
     (personId: string): SpouseWithMarriage[] => {
       const result: SpouseWithMarriage[] = [];
       const list = marriagesByPerson.get(personId) || [];
       for (const marriage of list) {
         let spouseId: string | null = null;
-        if (marriage.husband_id === personId) {
-          spouseId = marriage.wife_id;
-        } else if (marriage.wife_id === personId) {
-          spouseId = marriage.husband_id;
-        }
+        if (marriage.husband_id === personId) spouseId = marriage.wife_id;
+        else if (marriage.wife_id === personId) spouseId = marriage.husband_id;
         if (!spouseId) continue;
         const spouse = personMap.get(spouseId);
-        if (spouse) {
-          result.push({ person: spouse, marriageId: marriage.marriage_id });
-        }
+        if (spouse) result.push({ person: spouse, marriageId: marriage.marriage_id });
       }
-      const seen = new Set<string>();
-      const unique: SpouseWithMarriage[] = [];
-      for (const item of result) {
-        if (!seen.has(item.person.id)) {
-          seen.add(item.person.id);
-          unique.push(item);
-        }
-      }
-      return unique;
+      return result;
     },
     [marriagesByPerson, personMap]
   );
@@ -825,13 +675,11 @@ export default function FamilyTree() {
     (personId: string): Person[] => {
       const result: Person[] = [];
       for (const person of people) {
-        if (person.father_id === personId) {
-          result.push(person);
-        }
+        if (person.father_id === personId) result.push(person);
       }
-      const marriagesOfPerson = marriagesByPerson.get(personId) || [];
-      for (const marriage of marriagesOfPerson) {
-        const children = childrenByMarriage.get(marriage.marriage_id) || [];
+      const list = marriagesByPerson.get(personId) || [];
+      for (const m of list) {
+        const children = childrenByMarriage.get(m.marriage_id) || [];
         result.push(...children);
       }
       return uniquePeople(result);
@@ -866,11 +714,7 @@ export default function FamilyTree() {
         const children = childrenByMarriage.get(marriageId) || [];
         childrenBySpouse.set(marriageId, children);
       }
-      return {
-        person,
-        spouses: spousesWithMarriage,
-        childrenBySpouse,
-      };
+      return { person, spouses: spousesWithMarriage, childrenBySpouse };
     },
     [getSpousesWithMarriage, childrenByMarriage]
   );
@@ -895,17 +739,11 @@ export default function FamilyTree() {
     return buildRelationView(relationPerson);
   }, [relationPerson, buildRelationView]);
 
-  /* =======================================================
-     Main tree helpers
-  ======================================================= */
-
   const nodesWithChildren = useMemo(() => {
     const result = new Set<string>();
     const walk = (nodes: TreeNode[]) => {
       for (const node of nodes) {
-        if (node.children.length > 0) {
-          result.add(node.attributes.id);
-        }
+        if (node.children.length > 0) result.add(node.attributes.id);
         walk(node.children);
       }
     };
@@ -918,21 +756,15 @@ export default function FamilyTree() {
     [treeData, collapsedIds]
   );
 
-  /* =======================================================
-     التخطيط العضوي (Contour-Packed مع منع التداخل)
-  ======================================================= */
-
+  /* التخطيط الذكي مع منع العرض الأفقي المفرط والدفع للأعلى */
   const organicLayout = useMemo(() => {
     return computeOrganicLayout(visibleData, {
-      levelHeight: 150,
-      nodeGap: 100,        // زيادة الفجوة لمنع التداخل
-      verticalJitter: 20,  // تشتيت عمودي خفيف
+      levelHeight: 160,
+      nodeWidth: 140,
+      nodeHeight: 60,
+      minNodeGap: 25,
     });
   }, [visibleData]);
-
-  /* =======================================================
-     الاحتواء التلقائي عند التحميل
-  ======================================================= */
 
   useEffect(() => {
     if (treeKey !== 'tree-initial') return;
@@ -943,25 +775,18 @@ export default function FamilyTree() {
     setTranslate(fit.translate);
   }, [dimensions, organicLayout, treeKey]);
 
-  /* =======================================================
-     linkPaths و allPositionedNodes
-  ======================================================= */
-
+  /* رسم المسارات الموصلة الأنيقة المائلة بين الأبناء والآباء */
   const linkPaths = useMemo(() => {
     const paths: { path: string; strokeWidth: number }[] = [];
-    const LEVEL_HEIGHT = 150;
-
     const walk = (node: TreeNode, parentId: string | null) => {
       if (parentId) {
         const s = organicLayout.get(parentId);
         const t = organicLayout.get(node.attributes.id);
         if (s && t) {
           const midY = (s.y + t.y) / 2;
-          const depth = Math.abs(t.y) / LEVEL_HEIGHT;
-          const strokeWidth = Math.min(14, Math.max(2, 4 - depth * 0.15));
           paths.push({
             path: `M${s.x},${s.y} C${s.x},${midY} ${t.x},${midY} ${t.x},${t.y}`,
-            strokeWidth,
+            strokeWidth: 2.5,
           });
         }
       }
@@ -988,10 +813,7 @@ export default function FamilyTree() {
     return map;
   }, [visibleData]);
 
-  /* =======================================================
-     Search
-  ======================================================= */
-
+  /* Search */
   const searchResults = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
     if (!term) return [];
@@ -1005,14 +827,13 @@ export default function FamilyTree() {
       const path = findPath(treeData, personId);
       if (!path) return;
       const newCollapsedIds = new Set(collapsedIds);
-      for (const id of path) {
-        newCollapsedIds.delete(id);
-      }
+      for (const id of path) newCollapsedIds.delete(id);
       const expandedData = buildVisibleData(treeData, newCollapsedIds);
       const expandedLayout = computeOrganicLayout(expandedData, {
-        levelHeight: 150,
-        nodeGap: 100,
-        verticalJitter: 20,
+        levelHeight: 160,
+        nodeWidth: 140,
+        nodeHeight: 60,
+        minNodeGap: 25,
       });
       const targetPos = expandedLayout.get(personId) ?? null;
       setCollapsedIds(newCollapsedIds);
@@ -1073,46 +894,21 @@ export default function FamilyTree() {
     handleSelectSearchResult(match);
   }, [searchTerm, people, handleSelectSearchResult]);
 
-  /* =======================================================
-     Collapse
-  ======================================================= */
-
   const toggleCollapse = useCallback((id: string) => {
     setCollapsedIds((previous) => {
       const next = new Set(previous);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }, []);
 
-  /* =======================================================
-     تحديث معلومات الأخوات والخالات عند اختيار شخص
-  ======================================================= */
-
   useEffect(() => {
     if (selectedPerson) {
-      const sisters = getSisters(
-        selectedPerson.person,
-        people,
-        marriages,
-        childrenLinks,
-        personMap
-      );
+      const sisters = getSisters(selectedPerson.person, people, marriages, childrenLinks, personMap);
       setSistersInfo(sisters);
-
-      const aunts = getSistersOfMother(
-        selectedPerson.person,
-        people,
-        marriages,
-        childrenLinks,
-        personMap
-      );
+      const aunts = getSistersOfMother(selectedPerson.person, people, marriages, childrenLinks, personMap);
       setAuntsInfo(aunts);
-
       setSelectedSisterId(null);
       setSelectedAuntId(null);
       setShowAllSisters(false);
@@ -1127,10 +923,7 @@ export default function FamilyTree() {
     }
   }, [selectedPerson, people, marriages, childrenLinks, personMap]);
 
-  /* =======================================================
-     Main tree custom node (LEAF SHAPE)
-  ======================================================= */
-
+  /* Custom Leaf Node */
   const renderNode = useCallback(
     (props: CustomNodeElementProps) => {
       const { nodeDatum } = props;
@@ -1148,37 +941,15 @@ export default function FamilyTree() {
       if (selectedPerson) {
         if (showAllSisters) {
           for (const info of sistersInfo) {
-            if (
-              isPersonInFamily(
-                id,
-                info.sister.id,
-                people,
-                marriages,
-                childrenLinks,
-                personMap
-              )
-            ) {
+            if (isPersonInFamily(id, info.sister.id, people, marriages, childrenLinks, personMap)) {
               sisterColor = info.color;
               break;
             }
           }
         } else if (selectedSisterId) {
-          const found = sistersInfo.find(
-            (info) => info.sister.id === selectedSisterId
-          );
-          if (found) {
-            if (
-              isPersonInFamily(
-                id,
-                selectedSisterId,
-                people,
-                marriages,
-                childrenLinks,
-                personMap
-              )
-            ) {
-              sisterColor = found.color;
-            }
+          const found = sistersInfo.find((info) => info.sister.id === selectedSisterId);
+          if (found && isPersonInFamily(id, selectedSisterId, people, marriages, childrenLinks, personMap)) {
+            sisterColor = found.color;
           }
         }
       }
@@ -1187,37 +958,15 @@ export default function FamilyTree() {
       if (selectedPerson) {
         if (showAllAunts) {
           for (const info of auntsInfo) {
-            if (
-              isPersonInFamily(
-                id,
-                info.sister.id,
-                people,
-                marriages,
-                childrenLinks,
-                personMap
-              )
-            ) {
+            if (isPersonInFamily(id, info.sister.id, people, marriages, childrenLinks, personMap)) {
               auntColor = info.color;
               break;
             }
           }
         } else if (selectedAuntId) {
-          const found = auntsInfo.find(
-            (info) => info.sister.id === selectedAuntId
-          );
-          if (found) {
-            if (
-              isPersonInFamily(
-                id,
-                selectedAuntId,
-                people,
-                marriages,
-                childrenLinks,
-                personMap
-              )
-            ) {
-              auntColor = found.color;
-            }
+          const found = auntsInfo.find((info) => info.sister.id === selectedAuntId);
+          if (found && isPersonInFamily(id, selectedAuntId, people, marriages, childrenLinks, personMap)) {
+            auntColor = found.color;
           }
         }
       }
@@ -1230,12 +979,8 @@ export default function FamilyTree() {
       };
 
       const handlePointerUp = (event: React.PointerEvent) => {
-        const dx = parseFloat(
-          event.currentTarget.getAttribute('data-dx') || '0'
-        );
-        const dy = parseFloat(
-          event.currentTarget.getAttribute('data-dy') || '0'
-        );
+        const dx = parseFloat(event.currentTarget.getAttribute('data-dx') || '0');
+        const dy = parseFloat(event.currentTarget.getAttribute('data-dy') || '0');
         const moved = Math.sqrt((event.clientX - dx) ** 2 + (event.clientY - dy) ** 2) > 10;
         if (moved) return;
         const target = event.target as SVGElement;
@@ -1256,8 +1001,8 @@ export default function FamilyTree() {
       const rectWidth = Math.max(nameWidth, titleWidth, 100);
       const rectHeight = title ? 46 : 32;
 
-      const leafW = rectWidth * 1.3;
-      const leafH = rectHeight * 1.7;
+      const leafW = rectWidth * 1.25;
+      const leafH = rectHeight * 1.6;
       const leafPath = `M${-leafW / 2},0 Q0,${-leafH / 2} ${leafW / 2},0 Q0,${leafH / 2} ${-leafW / 2},0 Z`;
 
       return (
@@ -1307,9 +1052,7 @@ export default function FamilyTree() {
                 ? finalColor
                 : '#4ade80'
             }
-            strokeWidth={
-              isHighlighted || isSelected ? 2 : finalColor ? 2 : 1.3
-            }
+            strokeWidth={isHighlighted || isSelected ? 2 : finalColor ? 2 : 1.3}
           />
 
           <text
@@ -1317,13 +1060,13 @@ export default function FamilyTree() {
             y={title ? -7 : 5}
             textAnchor="middle"
             fill="#1e3a8a"
-            fontSize="16"
+            fontSize="15"
             fontWeight="600"
             style={{ fontFamily: 'Cairo, sans-serif' }}
           >
             {nodeDatum.name}
             {isDead && (
-              <tspan fill="#64748b" fontSize="12" dx="4" fontWeight="400">
+              <tspan fill="#64748b" fontSize="11" dx="4" fontWeight="400">
                 (رحمه الله)
               </tspan>
             )}
@@ -1332,10 +1075,10 @@ export default function FamilyTree() {
           {title && (
             <text
               x="0"
-              y="15"
+              y="14"
               textAnchor="middle"
               fill="#64748b"
-              fontSize="12"
+              fontSize="11"
               style={{ fontFamily: 'Cairo, sans-serif' }}
             >
               {title}
@@ -1345,14 +1088,14 @@ export default function FamilyTree() {
           {hasChildren && (
             <g
               data-arrow="true"
-              transform={`translate(${rectWidth / 2 + 10}, 0)`}
+              transform={`translate(${rectWidth / 2 + 8}, 0)`}
             >
-              <circle r={10} fill="#1e40af" data-arrow="true" />
+              <circle r={9} fill="#1e40af" data-arrow="true" />
               <text
                 textAnchor="middle"
                 dominantBaseline="central"
                 fill="#ffffff"
-                fontSize="11"
+                fontSize="10"
                 fontWeight="700"
                 data-arrow="true"
               >
@@ -1382,19 +1125,11 @@ export default function FamilyTree() {
     ]
   );
 
-  /* =======================================================
-     Open relationship view
-  ======================================================= */
-
   const openRelations = useCallback((person: Person) => {
     setSelectedPerson(null);
     setRelationPerson(person);
     setRelationOpen(true);
   }, []);
-
-  /* =======================================================
-     Relation person node
-  ======================================================= */
 
   const RelationPersonNode = ({
     person,
@@ -1416,33 +1151,19 @@ export default function FamilyTree() {
           'relative flex flex-col items-center justify-center',
           'rounded-xl border bg-white shadow-sm',
           'transition-all hover:-translate-y-0.5 hover:shadow-md',
-          compact
-            ? 'min-w-[110px] px-3 py-2'
-            : 'min-w-[145px] px-4 py-3',
+          compact ? 'min-w-[110px] px-3 py-2' : 'min-w-[145px] px-4 py-3',
           dead ? 'border-slate-300' : 'border-slate-200',
         ].join(' ')}
       >
-        <span className="text-sm font-bold text-slate-800">
-          {personName(person)}
-        </span>
+        <span className="text-sm font-bold text-slate-800">{personName(person)}</span>
         {role && <span className="mt-1 text-[11px] text-slate-500">{role}</span>}
         {person.family_title && (
-          <span className="mt-0.5 text-[10px] text-slate-400">
-            {person.family_title}
-          </span>
+          <span className="mt-0.5 text-[10px] text-slate-400">{person.family_title}</span>
         )}
-        {dead && (
-          <span className="mt-1 text-[10px] text-slate-400">
-            {person.life_status}
-          </span>
-        )}
+        {dead && <span className="mt-1 text-[10px] text-slate-400">{person.life_status}</span>}
       </button>
     );
   };
-
-  /* =======================================================
-     Family branch
-  ======================================================= */
 
   const FamilyBranch = ({ family }: { family: RelationFamily }) => {
     const { person, spouses, childrenBySpouse } = family;
@@ -1519,10 +1240,6 @@ export default function FamilyTree() {
     );
   };
 
-  /* =======================================================
-     Relation diagram
-  ======================================================= */
-
   const RelationDiagram = () => {
     if (!relationView) return null;
     const { person, parent, siblingFamilies, ownFamily } = relationView;
@@ -1534,7 +1251,7 @@ export default function FamilyTree() {
         <div
           className="absolute inset-4 md:inset-8 bg-slate-50 rounded-2xl shadow-2xl overflow-hidden"
           dir="rtl"
-          onClick={(event) => event.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
         >
           <div className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
             <div className="flex items-center gap-3">
@@ -1577,9 +1294,7 @@ export default function FamilyTree() {
                 <div className="w-full">
                   <div className="flex items-center justify-center gap-3 mb-5">
                     <div className="h-px w-12 bg-slate-300" />
-                    <span className="text-sm font-bold text-slate-700">
-                      الإخوة والأخوات وعائلاتهم
-                    </span>
+                    <span className="text-sm font-bold text-slate-700">الإخوة والأخوات وعائلاتهم</span>
                     <div className="h-px w-12 bg-slate-300" />
                   </div>
                   <div className="flex items-start justify-center gap-8 flex-wrap">
@@ -1596,26 +1311,17 @@ export default function FamilyTree() {
     );
   };
 
-  /* =========================================================
-     RADIAL BRANCH VIEW COMPONENT
-  ========================================================== */
-
+  /* Radial Branch View */
   function buildRadialTree(
     rootPerson: Person,
     getChildrenFn: (id: string) => Person[],
     maxDepth = 6,
-    maxNodes = 200,
+    maxNodes = 200
   ): RadialNode {
     let count = 0;
-
     const build = (person: Person, depth: number): RadialNode => {
       count++;
-      const node: RadialNode = {
-        id: person.id,
-        name: personName(person),
-        children: [],
-      };
-
+      const node: RadialNode = { id: person.id, name: personName(person), children: [] };
       if (depth < maxDepth && count < maxNodes) {
         const kids = getChildrenFn(person.id);
         for (const k of kids) {
@@ -1623,10 +1329,8 @@ export default function FamilyTree() {
           node.children.push(build(k, depth + 1));
         }
       }
-
       return node;
     };
-
     return build(rootPerson, 0);
   }
 
@@ -1638,7 +1342,6 @@ export default function FamilyTree() {
   }
 
   const RADIAL_STEP = 100;
-
   const RadialBranchView = ({
     root,
     onClose,
@@ -1650,20 +1353,12 @@ export default function FamilyTree() {
       const h = hierarchy<RadialNode>(root, (d) => d.children);
       const depth = h.height || 1;
       const radius = depth * RADIAL_STEP;
-
       const layout = d3tree<RadialNode>()
         .size([2 * Math.PI, radius])
-        .separation((a, b) =>
-          (a.parent === b.parent ? 1 : 1.6) / Math.max(a.depth, 1),
-        );
+        .separation((a, b) => (a.parent === b.parent ? 1 : 1.6) / Math.max(a.depth, 1));
 
       layout(h);
-
-      return {
-        nodes: h.descendants(),
-        links: h.links(),
-        maxDepth: depth,
-      };
+      return { nodes: h.descendants(), links: h.links(), maxDepth: depth };
     }, [root]);
 
     const size = maxDepth * RADIAL_STEP * 2 + 200;
@@ -1685,7 +1380,6 @@ export default function FamilyTree() {
               <X className="w-5 h-5" />
             </button>
           </div>
-
           <div className="p-4 overflow-auto flex justify-center">
             <svg width={size} height={size}>
               <g transform={`translate(${center},${center})`}>
@@ -1702,21 +1396,12 @@ export default function FamilyTree() {
                     />
                   );
                 })}
-
                 {nodes.map((node) => {
                   const p = polarToCartesian(node.x, node.y);
-                  const onRightHalf =
-                    Math.cos(node.x - Math.PI / 2) >= 0;
-
+                  const onRightHalf = Math.cos(node.x - Math.PI / 2) >= 0;
                   return (
-                    <g
-                      key={node.data.id}
-                      transform={`translate(${p.x},${p.y})`}
-                    >
-                      <circle
-                        r={5}
-                        fill={node.depth === 0 ? '#1e40af' : '#64748b'}
-                      />
+                    <g key={node.data.id} transform={`translate(${p.x},${p.y})`}>
+                      <circle r={5} fill={node.depth === 0 ? '#1e40af' : '#64748b'} />
                       <text
                         dy="0.32em"
                         x={onRightHalf ? 9 : -9}
@@ -1738,10 +1423,6 @@ export default function FamilyTree() {
     );
   };
 
-  /* =======================================================
-     Loading, Error, Empty
-  ======================================================= */
-
   if (loadState === 'loading') {
     return (
       <div dir="rtl" className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-3">
@@ -1756,9 +1437,6 @@ export default function FamilyTree() {
       <div dir="rtl" className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-3 px-4">
         <AlertCircle className="w-8 h-8 text-red-600" />
         <p className="text-sm text-red-700 text-center max-w-xl">{errorMsg}</p>
-        <a href="#/" className="text-sm text-blue-600 underline mt-2">
-          العودة للوحة التحكم
-        </a>
       </div>
     );
   }
@@ -1767,19 +1445,10 @@ export default function FamilyTree() {
     return (
       <div dir="rtl" className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-3 px-4">
         <AlertCircle className="w-8 h-8 text-amber-500" />
-        <p className="text-sm text-slate-600 text-center max-w-md">
-          لا توجد بيانات ذكور في قاعدة البيانات لعرض الشجرة.
-        </p>
-        <a href="#/" className="text-sm text-blue-600 underline mt-2">
-          العودة للوحة التحكم
-        </a>
+        <p className="text-sm text-slate-600 text-center max-w-md">لا توجد بيانات ذكور لعرض الشجرة.</p>
       </div>
     );
   }
-
-  /* =======================================================
-     Main UI
-  ======================================================= */
 
   return (
     <div dir="rtl" className="flex flex-col h-screen bg-slate-50 overflow-hidden">
@@ -1796,14 +1465,12 @@ export default function FamilyTree() {
             <input
               type="text"
               value={searchTerm}
-              onChange={(event) => {
-                setSearchTerm(event.target.value);
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
                 setSearchMessage('');
               }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  handleSearch();
-                }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSearch();
               }}
               placeholder="ابحث عن أي شخص: رجل أو امرأة…"
               className="w-full pr-9 pl-20 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400/30 focus:border-blue-400"
@@ -1854,11 +1521,8 @@ export default function FamilyTree() {
         </div>
       )}
 
-      {/* SVG الشجرة */}
-      <div
-        ref={containerRef}
-        className="flex-1 relative overflow-hidden bg-slate-50"
-      >
+      {/* الشجرة الرئيسي */}
+      <div ref={containerRef} className="flex-1 relative overflow-hidden bg-slate-50">
         {dimensions.width > 0 && visibleData.length > 0 && (
           <>
             <svg
@@ -1939,7 +1603,7 @@ export default function FamilyTree() {
               </g>
             </svg>
 
-            {/* أزرار التحكم بالتكبير والاحتواء */}
+            {/* أزرار التحكم */}
             <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-1 bg-white rounded-lg shadow-lg border border-slate-200 overflow-hidden">
               <button
                 type="button"
@@ -1983,7 +1647,6 @@ export default function FamilyTree() {
         {/* الشريط الجانبي للأخوات والخالات */}
         {selectedPerson && (
           <div className="absolute top-4 left-4 z-30 bg-white rounded-xl shadow-lg border border-slate-200 p-3 max-w-[240px] min-w-[200px] max-h-[70vh] overflow-y-auto">
-            {/* قسم الأخوات */}
             <div className="mb-3">
               <div className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-2">
                 <Users className="w-3.5 h-3.5" />
@@ -1998,9 +1661,7 @@ export default function FamilyTree() {
                       <button
                         key={sister.id}
                         onClick={() => {
-                          if (showAllSisters) {
-                            setShowAllSisters(false);
-                          }
+                          if (showAllSisters) setShowAllSisters(false);
                           if (selectedSisterId === sister.id) {
                             setSelectedSisterId(null);
                           } else {
@@ -2055,7 +1716,6 @@ export default function FamilyTree() {
               )}
             </div>
 
-            {/* قسم الخالات */}
             <div className="border-t border-slate-100 pt-3">
               <div className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-2">
                 <Users className="w-3.5 h-3.5" />
@@ -2070,9 +1730,7 @@ export default function FamilyTree() {
                       <button
                         key={sister.id}
                         onClick={() => {
-                          if (showAllAunts) {
-                            setShowAllAunts(false);
-                          }
+                          if (showAllAunts) setShowAllAunts(false);
                           if (selectedAuntId === sister.id) {
                             setSelectedAuntId(null);
                           } else {
@@ -2150,7 +1808,7 @@ export default function FamilyTree() {
         {selectedPerson && (
           <div
             className="absolute bottom-4 right-4 z-30 w-[320px] max-w-[calc(100%-32px)]"
-            onClick={(event) => event.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-100 flex items-start justify-between">
@@ -2191,28 +1849,6 @@ export default function FamilyTree() {
                         </span>
                       )}
                     </div>
-                    {selectedPerson.person.display_id && (
-                      <div className="flex items-center gap-1 mt-1">
-                        <span className="text-[10px] text-slate-400 font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200">
-                          #{selectedPerson.person.display_id}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (selectedPerson.person.display_id) {
-                              navigator.clipboard?.writeText(selectedPerson.person.display_id).catch(() => {});
-                            }
-                          }}
-                          className="text-slate-400 hover:text-slate-600 transition-colors"
-                          title="نسخ المعرف"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                          </svg>
-                        </button>
-                      </div>
-                    )}
                   </div>
                 </div>
                 <button
@@ -2265,9 +1901,7 @@ export default function FamilyTree() {
                 <button
                   type="button"
                   onClick={() => {
-                    setRadialRoot(
-                      buildRadialTree(selectedPerson.person, getChildren),
-                    );
+                    setRadialRoot(buildRadialTree(selectedPerson.person, getChildren));
                     setRadialOpen(true);
                   }}
                   className="w-full flex items-center justify-center gap-2 px-3 py-2.5 mt-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium"
@@ -2289,10 +1923,7 @@ export default function FamilyTree() {
       {relationOpen && <RelationDiagram />}
 
       {radialOpen && radialRoot && (
-        <RadialBranchView
-          root={radialRoot}
-          onClose={() => setRadialOpen(false)}
-        />
+        <RadialBranchView root={radialRoot} onClose={() => setRadialOpen(false)} />
       )}
     </div>
   );
