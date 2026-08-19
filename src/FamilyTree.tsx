@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Tree, {
-  RawNodeDatum,
-  CustomNodeElementProps,
-} from 'react-d3-tree';
-import {
-  hierarchy,
-  tree as d3tree,
-} from 'd3-hierarchy';
+import { RawNodeDatum, CustomNodeElementProps } from 'react-d3-tree';
+import { hierarchy, tree as d3tree } from 'd3-hierarchy';
 import {
   Loader2,
   AlertCircle,
@@ -20,7 +14,7 @@ import {
 import { supabase } from '@/lib/supabase';
 
 /* =========================================================
-   Types (نفس السابق)
+   Types (نفس السابق مع إضافة Contour)
 ========================================================= */
 
 interface Person {
@@ -84,21 +78,41 @@ type RelationView = {
   siblingFamilies: RelationFamily[];
 };
 
+interface RadialNode {
+  id: string;
+  name: string;
+  children: RadialNode[];
+}
+
+interface LayoutPosition {
+  x: number;
+  y: number;
+}
+
+interface LayoutOptions {
+  levelHeight?: number;
+  nodeGap?: number;          // المسافة الأفقية بين الفروع (تم استبدال siblingGap)
+  verticalJitter?: number;   // الإزاحة العمودية العشوائية
+}
+
+interface InternalNode {
+  node: TreeNode;
+  id: string;
+  children: InternalNode[];
+  descendants: number;
+  x: number;
+  y: number;
+  left: number;
+  right: number;
+}
+
+interface Contour {
+  left: number[];
+  right: number[];
+}
+
 /* =========================================================
-   Constants
-========================================================= */
-
-const NODE_SIZE = { x: 220, y: 140 };
-
-const SEPARATION = {
-  siblings: 1.5,
-  nonSiblings: 2,
-};
-
-const DEPTH_FACTOR = -180;
-
-/* =========================================================
-   Helpers (نفس السابق)
+   Helpers
 ========================================================= */
 
 function personName(person: Person | null | undefined): string {
@@ -272,34 +286,8 @@ function isPersonInFamily(
 }
 
 /* =========================================================
-   Layout Helpers (Contour-Packed مع وزن مضغوط وضغط جانبي)
+   Layout Helpers (Contour-Packed مع فحص التداخل الفعلي)
 ========================================================= */
-
-interface LayoutPosition {
-  x: number;
-  y: number;
-}
-
-interface LayoutOptions {
-  levelHeight?: number;      // المسافة العمودية بين الأجيال
-  nodeGap?: number;          // المسافة الأفقية الأساسية بين العقد
-  branchExpansion?: number;  // مدى توسع الفروع الكبيرة (يضرب بالوزن)
-  trunkStrength?: number;    // قوة الميل للبقاء على الجذع (0=مرن, 1=جامد)
-  jitter?: number;           // عدم انتظام نهائي (صغير)
-  compression?: number;      // قوة الضغط الإضافي (0=لا ضغط, 1=ضغط كامل)
-  gravityDepth?: number;     // معدل تناقص قوة الجاذبية مع العمق
-}
-
-interface InternalNode {
-  node: TreeNode;
-  id: string;
-  children: InternalNode[];
-  descendants: number;
-  x: number;
-  y: number;
-  left: number;   // أقصى يسار الفرع (بعد التخطيط)
-  right: number;  // أقصى يمين الفرع
-}
 
 function hashToUnit(id: string): number {
   let h = 2166136261;
@@ -308,13 +296,6 @@ function hashToUnit(id: string): number {
     h = Math.imul(h, 16777619);
   }
   return ((h >>> 0) % 10000) / 10000;
-}
-
-function getJitter(id: string, depth: number, amount: number): number {
-  if (amount <= 0) return 0;
-  const n = hashToUnit(id) * 2 - 1;
-  const factor = Math.min(1, 0.35 + depth * 0.04);
-  return n * amount * factor;
 }
 
 function moveSubtree(node: InternalNode, dx: number): void {
@@ -332,160 +313,149 @@ function computeOrganicLayout(
 ): Map<string, LayoutPosition> {
   const {
     levelHeight = 150,
-    nodeGap = 48,
-    branchExpansion = 0.5,
-    trunkStrength = 0.72,
-    jitter = 5,
-    compression = 0.7,
-    gravityDepth = 0.06, // معامل تناقص الجاذبية مع العمق
+    nodeGap = 100, // زيادة الفجوة لمنع التداخل
+    verticalJitter = 25,
   } = options;
 
   const result = new Map<string, LayoutPosition>();
 
   if (roots.length === 0) return result;
 
-  // 1. بناء الهيكل الداخلي وحساب عدد الأحفاد الحقيقي
+  // 1. بناء الهيكل الداخلي
   function build(node: TreeNode, depth: number): InternalNode {
     const children = (node.children || []).map((c) => build(c, depth + 1));
     let descendants = 1;
     for (const child of children) descendants += child.descendants;
+
+    const verticalOffset =
+      depth === 0
+        ? 0
+        : (hashToUnit(node.attributes.id) - 0.5) * verticalJitter * 2;
+
     return {
       node,
       id: node.attributes.id,
       children,
       descendants,
       x: 0,
-      y: -depth * levelHeight,
+      y: -depth * levelHeight + verticalOffset,
       left: 0,
       right: 0,
     };
   }
 
-  // 2. وزن مضغوط للفرع (جذر تربيعي)
-  function branchWeight(n: InternalNode): number {
-    return Math.sqrt(n.descendants);
-  }
-
-  // 3. دالة تخطيط كل فرع مع إمكانية تمرير موقع مفضل (للحفاظ على الجذع)
-  function layoutSubtree(n: InternalNode, preferredX: number): void {
-    const children = n.children;
-
-    // ورقة
-    if (children.length === 0) {
-      n.x = preferredX + getJitter(n.id, 0, jitter);
-      n.left = n.x;
-      n.right = n.x;
-      return;
-    }
-
-    // ابن واحد → جذع مستقيم
-    if (children.length === 1) {
-      layoutSubtree(children[0], preferredX);
-      n.x = children[0].x;
-      n.left = children[0].left;
-      n.right = children[0].right;
-      return;
-    }
-
-    // أكثر من ابن
-    const weights = children.map(branchWeight);
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
-
-    // نقوم بتوزيع الأطفال مع مراعاة الوزن (لكن بشكل مضغوط)
-    let cursor = preferredX;
-    const childCenters: number[] = [];
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      const w = weights[i] / totalWeight;
-
-      // المسافة المبدئية: nodeGap + جزء من branchExpansion يتناسب مع الوزن
-      const gap = nodeGap + w * branchExpansion * nodeGap;
-      cursor += gap * 0.5; // نبدأ من منتصف المسافة
-
-      layoutSubtree(child, cursor);
-      childCenters.push(child.x);
-
-      // ننهي بوضع cursor بعد نهاية الفرع + nodeGap
-      cursor = child.right + nodeGap;
-    }
-
-    // الضغط: نجمع حدود الفرع كاملة
-    const allLeft = children.map((c) => c.left);
-    const allRight = children.map((c) => c.right);
-    const groupLeft = Math.min(...allLeft);
-    const groupRight = Math.max(...allRight);
-
-    // مركز المجموعة
-    const groupCenter = (groupLeft + groupRight) / 2;
-
-    // الموقع المفضل للأب: يميل إلى preferredX (الجذع) بقوة trunkStrength
-    const centerInfluence = 1 - trunkStrength;
-    const targetX = preferredX * trunkStrength + groupCenter * centerInfluence;
-    const shift = targetX - groupCenter;
-
-    // نقل كل الأطفال بحيث يصبح مركزهم عند targetX
-    for (const child of children) {
-      moveSubtree(child, shift);
-    }
-
-    // تحديث حدود الأب
-    const newLeft = Math.min(targetX, ...children.map((c) => c.left));
-    const newRight = Math.max(targetX, ...children.map((c) => c.right));
-
-    n.x = targetX + getJitter(n.id, 0, jitter);
-    n.left = newLeft;
-    n.right = newRight;
-  }
-
-  // 4. تخطيط أولي لكل جذر
-  const trees = roots.map((root) => build(root, 0));
-
-  let globalX = 0;
-  for (const tree of trees) {
-    layoutSubtree(tree, globalX);
-    // تحريك الشجرة بأكملها لتجنب التداخل مع الجذور الأخرى
-    const minX = tree.left;
-    if (minX < globalX) {
-      moveSubtree(tree, globalX - minX);
-    }
-    globalX = tree.right + nodeGap * 2;
-  }
-
-  // 5. ضغط جانبي إضافي على المستويات (lateral compaction)
-  //    نجمع كل العقد حسب العمق ونضغطها أفقياً
-  const levels = new Map<number, InternalNode[]>();
-  function collectNodes(node: InternalNode, depth: number) {
-    if (!levels.has(depth)) levels.set(depth, []);
-    levels.get(depth)!.push(node);
+  // 2. حساب المسار الخارجي (Contour) لمنع التداخل
+  function computeContour(node: InternalNode): Contour {
+    let left = [node.x];
+    let right = [node.x];
     for (const child of node.children) {
-      collectNodes(child, depth + 1);
-    }
-  }
-
-  for (const tree of trees) {
-    collectNodes(tree, 0);
-  }
-
-  // نمر على كل مستوى ونضغط العقد نحو بعضها
-  for (const [, nodes] of levels) {
-    nodes.sort((a, b) => a.x - b.x);
-    for (let i = 1; i < nodes.length; i++) {
-      const prev = nodes[i - 1];
-      const curr = nodes[i];
-      const minGap = nodeGap * 0.8; // المسافة الدنيا المسموحة
-      const actualGap = curr.x - prev.x;
-      if (actualGap < minGap) {
-        const dx = minGap - actualGap;
-        // نطبق الضغط بشكل تدريجي: الفرع الكبير يتحرك أقل
-        const weight = 1 / Math.sqrt(Math.max(1, curr.descendants));
-        const move = dx * weight * compression;
-        moveSubtree(curr, move);
+      const childContour = computeContour(child);
+      for (let i = 0; i < childContour.left.length; i++) {
+        const depthIdx = i + 1;
+        if (left[depthIdx] === undefined) {
+          left[depthIdx] = childContour.left[i];
+          right[depthIdx] = childContour.right[i];
+        } else {
+          left[depthIdx] = Math.min(left[depthIdx], childContour.left[i]);
+          right[depthIdx] = Math.max(right[depthIdx], childContour.right[i]);
+        }
       }
     }
+    return { left, right };
   }
 
-  // 6. تصدير النتائج
+  // 3. ترتيب الفروع وتطبيق قانون التنافر عند أي تداخل
+  function layoutSubtree(node: InternalNode): Contour {
+    if (node.children.length === 0) {
+      node.x = 0;
+      node.left = 0;
+      node.right = 0;
+      return { left: [0], right: [0] };
+    }
+
+    const childContours: Contour[] = [];
+
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      const contour = layoutSubtree(child);
+
+      if (i > 0) {
+        let maxShift = 0;
+        const prevContour = childContours[i - 1];
+        const minDepth = Math.min(prevContour.right.length, contour.left.length);
+
+        for (let d = 0; d < minDepth; d++) {
+          const overlap = prevContour.right[d] - contour.left[d] + nodeGap;
+          if (overlap > maxShift) {
+            maxShift = overlap;
+          }
+        }
+
+        if (maxShift > 0) {
+          moveSubtree(child, maxShift);
+          for (let d = 0; d < contour.left.length; d++) {
+            contour.left[d] += maxShift;
+            contour.right[d] += maxShift;
+          }
+        }
+      }
+
+      childContours.push(contour);
+    }
+
+    // وضع الأب في منتصف أبنائه
+    const firstChild = node.children[0];
+    const lastChild = node.children[node.children.length - 1];
+    const childrenCenter = (firstChild.x + lastChild.x) / 2;
+    node.x = childrenCenter;
+
+    // تجميع الكونتور النهائي للفرع الحالي
+    const currentContour: Contour = {
+      left: [node.x],
+      right: [node.x],
+    };
+
+    for (const c of childContours) {
+      for (let d = 0; d < c.left.length; d++) {
+        const depthIdx = d + 1;
+        if (currentContour.left[depthIdx] === undefined) {
+          currentContour.left[depthIdx] = c.left[d];
+          currentContour.right[depthIdx] = c.right[d];
+        } else {
+          currentContour.left[depthIdx] = Math.min(
+            currentContour.left[depthIdx],
+            c.left[d]
+          );
+          currentContour.right[depthIdx] = Math.max(
+            currentContour.right[depthIdx],
+            c.right[d]
+          );
+        }
+      }
+    }
+
+    return currentContour;
+  }
+
+  // 4. تنفيذ التخطيط لكل جذور الأشجار
+  const trees = roots.map((root) => build(root, 0));
+  let globalX = 0;
+
+  for (const tree of trees) {
+    const contour = layoutSubtree(tree);
+    const minLeft = Math.min(...contour.left);
+    if (minLeft < globalX) {
+      const shift = globalX - minLeft;
+      moveSubtree(tree, shift);
+      for (let i = 0; i < contour.right.length; i++) {
+        contour.right[i] += shift;
+      }
+    }
+    const maxRight = Math.max(...contour.right);
+    globalX = maxRight + nodeGap * 2;
+  }
+
+  // 5. استخراج الإحداثيات النهائية
   function exportPositions(node: InternalNode) {
     result.set(node.id, { x: node.x, y: node.y });
     for (const child of node.children) {
@@ -509,7 +479,9 @@ function computeFitZoom(
   viewportW: number,
   viewportH: number,
 ) {
-  if (positions.size === 0) return { zoom: 1, translate: { x: viewportW / 2, y: 60 } };
+  if (positions.size === 0 || viewportW <= 0 || viewportH <= 0) {
+    return { zoom: 1, translate: { x: viewportW / 2 || 300, y: 60 } };
+  }
   let minX = Infinity,
     maxX = -Infinity,
     minY = Infinity,
@@ -534,7 +506,7 @@ function computeFitZoom(
 }
 
 /* =========================================================
-   Main tree helpers (نفس السابق)
+   Main tree helpers
 ========================================================= */
 
 function findPath(
@@ -620,7 +592,7 @@ export default function FamilyTree() {
   const currentZoomRef = useRef(1);
 
   /* =======================================================
-     Load all data (نفس السابق)
+     Load all data
   ======================================================= */
 
   useEffect(() => {
@@ -732,26 +704,30 @@ export default function FamilyTree() {
   }, []);
 
   /* =======================================================
-     Dimensions (نفس السابق)
+     Dimensions (مع ResizeObserver)
   ======================================================= */
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const updateDims = () => {
-      if (!containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      setDimensions({ width: rect.width, height: rect.height });
-      if (treeKey === 'tree-initial') {
-        setTranslate({ x: rect.width / 2, y: rect.height - 80 });
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setDimensions({ width, height });
+        }
       }
+    });
+
+    observer.observe(containerRef.current);
+
+    return () => {
+      observer.disconnect();
     };
-    updateDims();
-    window.addEventListener('resize', updateDims);
-    return () => window.removeEventListener('resize', updateDims);
-  }, [loadState, treeKey]);
+  }, [loadState]);
 
   /* =======================================================
-     ESC handlers (نفس السابق)
+     ESC handlers
   ======================================================= */
 
   useEffect(() => {
@@ -771,7 +747,7 @@ export default function FamilyTree() {
   }, []);
 
   /* =======================================================
-     Maps (نفس السابق)
+     Maps
   ======================================================= */
 
   const personMap = useMemo(() => {
@@ -812,7 +788,7 @@ export default function FamilyTree() {
   }, [childrenLinks, personMap]);
 
   /* =======================================================
-     Relationship helpers (نفس السابق)
+     Relationship helpers
   ======================================================= */
 
   const getSpousesWithMarriage = useCallback(
@@ -943,18 +919,14 @@ export default function FamilyTree() {
   );
 
   /* =======================================================
-     التخطيط العضوي (باستخدام الخوارزمية الجديدة)
+     التخطيط العضوي (Contour-Packed مع منع التداخل)
   ======================================================= */
 
   const organicLayout = useMemo(() => {
     return computeOrganicLayout(visibleData, {
       levelHeight: 150,
-      nodeGap: 48,
-      branchExpansion: 0.5,
-      trunkStrength: 0.72,
-      jitter: 5,
-      compression: 0.7,
-      gravityDepth: 0.06, // تناقص الجاذبية مع العمق
+      nodeGap: 100,        // زيادة الفجوة لمنع التداخل
+      verticalJitter: 20,  // تشتيت عمودي خفيف
     });
   }, [visibleData]);
 
@@ -977,14 +949,15 @@ export default function FamilyTree() {
 
   const linkPaths = useMemo(() => {
     const paths: { path: string; strokeWidth: number }[] = [];
+    const LEVEL_HEIGHT = 150;
+
     const walk = (node: TreeNode, parentId: string | null) => {
       if (parentId) {
         const s = organicLayout.get(parentId);
         const t = organicLayout.get(node.attributes.id);
         if (s && t) {
           const midY = (s.y + t.y) / 2;
-          // سمك الخط حسب العمق (تخفيف تدريجي)
-          const depth = Math.abs(t.y) / levelHeight;
+          const depth = Math.abs(t.y) / LEVEL_HEIGHT;
           const strokeWidth = Math.min(14, Math.max(2, 4 - depth * 0.15));
           paths.push({
             path: `M${s.x},${s.y} C${s.x},${midY} ${t.x},${midY} ${t.x},${t.y}`,
@@ -996,6 +969,7 @@ export default function FamilyTree() {
         walk(child, node.attributes.id);
       }
     };
+
     for (const root of visibleData) {
       walk(root, null);
     }
@@ -1015,7 +989,7 @@ export default function FamilyTree() {
   }, [visibleData]);
 
   /* =======================================================
-     Search (نفس السابق)
+     Search
   ======================================================= */
 
   const searchResults = useMemo(() => {
@@ -1037,12 +1011,8 @@ export default function FamilyTree() {
       const expandedData = buildVisibleData(treeData, newCollapsedIds);
       const expandedLayout = computeOrganicLayout(expandedData, {
         levelHeight: 150,
-        nodeGap: 48,
-        branchExpansion: 0.5,
-        trunkStrength: 0.72,
-        jitter: 5,
-        compression: 0.7,
-        gravityDepth: 0.06,
+        nodeGap: 100,
+        verticalJitter: 20,
       });
       const targetPos = expandedLayout.get(personId) ?? null;
       setCollapsedIds(newCollapsedIds);
@@ -1104,7 +1074,7 @@ export default function FamilyTree() {
   }, [searchTerm, people, handleSelectSearchResult]);
 
   /* =======================================================
-     Collapse (نفس السابق)
+     Collapse
   ======================================================= */
 
   const toggleCollapse = useCallback((id: string) => {
@@ -1158,7 +1128,7 @@ export default function FamilyTree() {
   }, [selectedPerson, people, marriages, childrenLinks, personMap]);
 
   /* =======================================================
-     Main tree custom node (LEAF SHAPE) - بدون تغيير
+     Main tree custom node (LEAF SHAPE)
   ======================================================= */
 
   const renderNode = useCallback(
@@ -1413,7 +1383,7 @@ export default function FamilyTree() {
   );
 
   /* =======================================================
-     Open relationship view (نفس السابق)
+     Open relationship view
   ======================================================= */
 
   const openRelations = useCallback((person: Person) => {
@@ -1423,7 +1393,7 @@ export default function FamilyTree() {
   }, []);
 
   /* =======================================================
-     Relation person node (نفس السابق)
+     Relation person node
   ======================================================= */
 
   const RelationPersonNode = ({
@@ -1471,7 +1441,7 @@ export default function FamilyTree() {
   };
 
   /* =======================================================
-     Family branch (نفس السابق)
+     Family branch
   ======================================================= */
 
   const FamilyBranch = ({ family }: { family: RelationFamily }) => {
@@ -1550,7 +1520,7 @@ export default function FamilyTree() {
   };
 
   /* =======================================================
-     Relation diagram (نفس السابق)
+     Relation diagram
   ======================================================= */
 
   const RelationDiagram = () => {
@@ -1627,14 +1597,8 @@ export default function FamilyTree() {
   };
 
   /* =========================================================
-     RADIAL BRANCH VIEW COMPONENT (نفس السابق)
+     RADIAL BRANCH VIEW COMPONENT
   ========================================================== */
-
-  interface RadialNode {
-    id: string;
-    name: string;
-    children: RadialNode[];
-  }
 
   function buildRadialTree(
     rootPerson: Person,
@@ -1722,7 +1686,7 @@ export default function FamilyTree() {
             </button>
           </div>
 
-          <div className="p-4 overflow-auto">
+          <div className="p-4 overflow-auto flex justify-center">
             <svg width={size} height={size}>
               <g transform={`translate(${center},${center})`}>
                 {links.map((link, i) => {
@@ -1775,7 +1739,7 @@ export default function FamilyTree() {
   };
 
   /* =======================================================
-     Loading, Error, Empty (نفس السابق)
+     Loading, Error, Empty
   ======================================================= */
 
   if (loadState === 'loading') {
@@ -1814,12 +1778,12 @@ export default function FamilyTree() {
   }
 
   /* =======================================================
-     Main UI (نفس السابق)
+     Main UI
   ======================================================= */
 
   return (
     <div dir="rtl" className="flex flex-col h-screen bg-slate-50 overflow-hidden">
-      {/* Header (نفس السابق) */}
+      {/* Header */}
       <div className="relative z-20 bg-white border-b border-slate-200 px-3 md:px-4 py-3 flex items-center gap-3 flex-wrap shrink-0">
         <a href="#/" className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 shrink-0">
           <ArrowRight className="w-4 h-4" />
@@ -1890,10 +1854,10 @@ export default function FamilyTree() {
         </div>
       )}
 
-      {/* SVG المخصصة بدلاً من Tree */}
+      {/* SVG الشجرة */}
       <div
         ref={containerRef}
-        className="flex-1 relative overflow-hidden"
+        className="flex-1 relative overflow-hidden bg-slate-50"
       >
         {dimensions.width > 0 && visibleData.length > 0 && (
           <>
@@ -2016,7 +1980,7 @@ export default function FamilyTree() {
           </>
         )}
 
-        {/* الشريط الجانبي للأخوات والخالات (نفس السابق) */}
+        {/* الشريط الجانبي للأخوات والخالات */}
         {selectedPerson && (
           <div className="absolute top-4 left-4 z-30 bg-white rounded-xl shadow-lg border border-slate-200 p-3 max-w-[240px] min-w-[200px] max-h-[70vh] overflow-y-auto">
             {/* قسم الأخوات */}
@@ -2182,7 +2146,7 @@ export default function FamilyTree() {
           </div>
         )}
 
-        {/* البطاقة الشخصية (نفس السابق) */}
+        {/* البطاقة الشخصية */}
         {selectedPerson && (
           <div
             className="absolute bottom-4 right-4 z-30 w-[320px] max-w-[calc(100%-32px)]"
