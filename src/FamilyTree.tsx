@@ -96,16 +96,6 @@ interface LayoutOptions {
   minNodeGap?: number;
 }
 
-interface InternalNode {
-  node: TreeNode;
-  id: string;
-  children: InternalNode[];
-  x: number;
-  y: number;
-  baseY: number; // الإحداثي الأساسي للجيل
-  depth: number;
-}
-
 /* =========================================================
    Helpers
 ========================================================= */
@@ -272,121 +262,239 @@ function isPersonInFamily(
 }
 
 /* =========================================================
-   Layout Engine: الهروب للأعلى لمنع التداخل والأفقية الزائدة
+   Layout Engine – خوارزمية Buchheim (Reingold–Tilford) مع مسافة متغيرة حسب العمق
 ========================================================= */
+
+interface BNode {
+  node: TreeNode;
+  id: string;
+  children: BNode[];
+  parent: BNode | null;
+  number: number; // ترتيب بين الإخوة (1-based)
+  depth: number;
+
+  x: number;
+  mod: number;
+  thread: BNode | null;
+  ancestorRef: BNode;
+  change: number;
+  shift: number;
+
+  finalX: number;
+  finalY: number;
+}
+
+function buildBNode(
+  node: TreeNode,
+  depth: number,
+  parent: BNode | null,
+  number: number
+): BNode {
+  const b: BNode = {
+    node,
+    id: node.attributes.id,
+    children: [],
+    parent,
+    number,
+    depth,
+    x: 0,
+    mod: 0,
+    thread: null,
+    ancestorRef: null as any,
+    change: 0,
+    shift: 0,
+    finalX: 0,
+    finalY: 0,
+  };
+  b.ancestorRef = b;
+  b.children = (node.children || []).map((c, i) => buildBNode(c, depth + 1, b, i + 1));
+  return b;
+}
+
+function leftSibling(v: BNode): BNode | null {
+  if (!v.parent) return null;
+  return v.number > 1 ? v.parent.children[v.number - 2] : null;
+}
+
+function leftmostChild(v: BNode): BNode | null {
+  return v.children.length ? v.children[0] : null;
+}
+
+function rightmostChild(v: BNode): BNode | null {
+  return v.children.length ? v.children[v.children.length - 1] : null;
+}
+
+function nextRightContour(v: BNode): BNode | null {
+  return v.children.length ? rightmostChild(v) : v.thread;
+}
+
+function nextLeftContour(v: BNode): BNode | null {
+  return v.children.length ? leftmostChild(v) : v.thread;
+}
+
+function moveSubtree(wLeft: BNode, wRight: BNode, shift: number): void {
+  const subtrees = wRight.number - wLeft.number;
+  if (subtrees === 0) return;
+  wRight.change -= shift / subtrees;
+  wRight.shift += shift;
+  wLeft.change += shift / subtrees;
+  wRight.x += shift;
+  wRight.mod += shift;
+}
+
+function ancestorOf(vIm: BNode, v: BNode, defaultAncestor: BNode): BNode {
+  if (v.parent && v.parent.children.includes(vIm.ancestorRef)) {
+    return vIm.ancestorRef;
+  }
+  return defaultAncestor;
+}
+
+// تم تعديل apportion لتقبل دالة مسافة متغيرة حسب العمق
+function apportion(v: BNode, defaultAncestor: BNode, distanceFn: (depth: number) => number): BNode {
+  const w = leftSibling(v);
+  if (!w || !v.parent) return defaultAncestor;
+
+  let vIp = v, vOp = v, vIm = w, vOm = v.parent.children[0];
+  let sIp = v.mod, sOp = v.mod, sIm = vIm.mod, sOm = vOm.mod;
+
+  let nr = nextRightContour(vIm);
+  let nl = nextLeftContour(vIp);
+
+  while (nr && nl) {
+    vIm = nr;
+    vIp = nl;
+    vOm = nextLeftContour(vOm)!;
+    vOp = nextRightContour(vOp)!;
+    vOp.ancestorRef = v;
+
+    // استخدام المسافة المتغيرة حسب عمق العقدة v
+    const shift = (vIm.x + sIm) - (vIp.x + sIp) + distanceFn(v.depth);
+    if (shift > 0) {
+      moveSubtree(ancestorOf(vIm, v, defaultAncestor), v, shift);
+      sIp += shift;
+      sOp += shift;
+    }
+    sIm += vIm.mod;
+    sIp += vIp.mod;
+    sOm += vOm.mod;
+    sOp += vOp.mod;
+
+    nr = nextRightContour(vIm);
+    nl = nextLeftContour(vIp);
+  }
+
+  if (nr && !nextRightContour(vOp)) {
+    vOp.thread = nr;
+    vOp.mod += sIm - sOp;
+  }
+  if (nl && !nextLeftContour(vOm)) {
+    vOm.thread = nl;
+    vOm.mod += sIp - sOm;
+    defaultAncestor = v;
+  }
+  return defaultAncestor;
+}
+
+function executeShifts(v: BNode): void {
+  let shift = 0;
+  let change = 0;
+  for (let i = v.children.length - 1; i >= 0; i--) {
+    const w = v.children[i];
+    w.x += shift;
+    w.mod += shift;
+    change += w.change;
+    shift += w.shift + change;
+  }
+}
+
+// تم تعديل firstWalk لتقبل دالة مسافة متغيرة
+function firstWalk(v: BNode, distanceFn: (depth: number) => number): void {
+  if (v.children.length === 0) {
+    const sib = leftSibling(v);
+    v.x = sib ? sib.x + distanceFn(v.depth) : 0;
+  } else {
+    let defaultAncestor = v.children[0];
+    for (const w of v.children) {
+      firstWalk(w, distanceFn);
+      defaultAncestor = apportion(w, defaultAncestor, distanceFn);
+    }
+    executeShifts(v);
+    const first = v.children[0];
+    const last = v.children[v.children.length - 1];
+    const midpoint = (first.x + last.x) / 2;
+    const sib = leftSibling(v);
+    if (sib) {
+      v.x = sib.x + distanceFn(v.depth);
+      v.mod = v.x - midpoint;
+    } else {
+      v.x = midpoint;
+    }
+  }
+}
+
+function secondWalk(v: BNode, modSum: number, levelHeight: number): void {
+  v.finalX = v.x + modSum;
+  v.finalY = -v.depth * levelHeight;
+  for (const child of v.children) {
+    secondWalk(child, modSum + v.mod, levelHeight);
+  }
+}
+
+function collectFinal(v: BNode, result: Map<string, LayoutPosition>): void {
+  result.set(v.id, { x: v.finalX, y: v.finalY });
+  for (const child of v.children) collectFinal(child, result);
+}
+
+function subtreeExtent(v: BNode): { min: number; max: number } {
+  let min = v.finalX, max = v.finalX;
+  for (const child of v.children) {
+    const e = subtreeExtent(child);
+    min = Math.min(min, e.min);
+    max = Math.max(max, e.max);
+  }
+  return { min, max };
+}
+
+function shiftFinal(v: BNode, dx: number): void {
+  v.finalX += dx;
+  for (const child of v.children) shiftFinal(child, dx);
+}
+
+function maxDepthOf(v: BNode): number {
+  if (v.children.length === 0) return v.depth;
+  return Math.max(...v.children.map(maxDepthOf));
+}
 
 function computeOrganicLayout(
   roots: TreeNode[],
   options: LayoutOptions = {}
 ): Map<string, LayoutPosition> {
-  const {
-    levelHeight = 160,
-    nodeWidth = 140,
-    nodeHeight = 60,
-    minNodeGap = 20,
-  } = options;
-
+  const { levelHeight = 160, nodeWidth = 140, minNodeGap = 25 } = options;
   const result = new Map<string, LayoutPosition>();
   if (roots.length === 0) return result;
 
-  // 1. بناء الهيكل الشجري الداخلي
-  function buildInternal(node: TreeNode, depth: number): InternalNode {
-    const children = (node.children || []).map((c) => buildInternal(c, depth + 1));
-    const baseY = -depth * levelHeight;
-    return {
-      node,
-      id: node.attributes.id,
-      children,
-      x: 0,
-      y: baseY,
-      baseY,
-      depth,
-    };
-  }
+  const baseDistance = nodeWidth + minNodeGap;
+  const bRoots = roots.map((r) => buildBNode(r, 0, null, 1));
+  const overallMaxDepth = Math.max(...bRoots.map(maxDepthOf), 1);
 
-  // 2. الحساب المبدئي لمواقع x مع الموازنة
-  function computeInitialX(node: InternalNode): number {
-    if (node.children.length === 0) {
-      return nodeWidth + minNodeGap;
+  // دالة مسافة متغيرة: تبدأ بـ 0.5 من القاعدة عند الجذع وتصل إلى 1.0 عند الأحدث
+  const distanceFn = (depth: number) => {
+    const t = Math.min(1, depth / overallMaxDepth);
+    const factor = 0.5 + 0.5 * t; // من 0.5 إلى 1.0 تدريجياً
+    return baseDistance * factor;
+  };
+
+  let cursor = 0;
+  for (const bRoot of bRoots) {
+    firstWalk(bRoot, distanceFn);
+    secondWalk(bRoot, 0, levelHeight);
+    const { min, max } = subtreeExtent(bRoot);
+    if (min < cursor) {
+      shiftFinal(bRoot, cursor - min);
     }
-    let totalSpan = 0;
-    const childSpans: number[] = [];
-    for (const child of node.children) {
-      const span = computeInitialX(child);
-      childSpans.push(span);
-      totalSpan += span;
-    }
-
-    let currentX = -totalSpan / 2;
-    for (let i = 0; i < node.children.length; i++) {
-      const child = node.children[i];
-      const span = childSpans[i];
-      const childCenterX = currentX + span / 2;
-      shiftSubtreeX(child, childCenterX);
-      currentX += span;
-    }
-
-    node.x = 0; // الأب في المنتصف بالنسبة لأبنائه
-    return totalSpan;
-  }
-
-  function shiftSubtreeX(node: InternalNode, dx: number) {
-    node.x += dx;
-    for (const child of node.children) {
-      shiftSubtreeX(child, dx);
-    }
-  }
-
-  // 3. منع التداخل الرأسي والأفقي عبر الضبط العمودي (Staggering / Vertical Escape)
-  const allNodesList: InternalNode[] = [];
-  function collectNodes(node: InternalNode) {
-    allNodesList.push(node);
-    for (const child of node.children) {
-      collectNodes(child);
-    }
-  }
-
-  const internalRoots = roots.map((r) => buildInternal(r, 0));
-  let currentRootX = 0;
-
-  for (const root of internalRoots) {
-    const rootSpan = computeInitialX(root);
-    shiftSubtreeX(root, currentRootX + rootSpan / 2);
-    currentRootX += rootSpan + minNodeGap * 2;
-    collectNodes(root);
-  }
-
-  // تجميع العقد حسب الجيل (Depth) لحل التزاحم
-  const nodesByDepth = new Map<number, InternalNode[]>();
-  for (const n of allNodesList) {
-    const list = nodesByDepth.get(n.depth) || [];
-    list.push(n);
-    nodesByDepth.set(n.depth, list);
-  }
-
-  // إزاحة العقد رأسيًا (للأعلى والأسفل) إذا اقتربت جدًا أفقياً
-  nodesByDepth.forEach((nodesInDepth) => {
-    // ترتيب العقد حسب x
-    nodesInDepth.sort((a, b) => a.x - b.x);
-
-    for (let i = 0; i < nodesInDepth.length - 1; i++) {
-      const curr = nodesInDepth[i];
-      const next = nodesInDepth[i + 1];
-
-      const xOverlap = (curr.x + nodeWidth / 2) - (next.x - nodeWidth / 2);
-
-      // إذا كانت العقدتان متقاربتين جداً أفقياً، ارفع العقدة المجاورة للأعلى
-      if (xOverlap > -minNodeGap) {
-        // دفع العقدة رأسيًا للأعلى (أو بالتناوب)
-        const staggerStep = (i % 2 === 0 ? -1 : 1) * (nodeHeight * 0.75);
-        next.y = next.baseY + staggerStep;
-      }
-    }
-  });
-
-  // 4. استخراج المواقع النهائية
-  for (const n of allNodesList) {
-    result.set(n.id, { x: n.x, y: n.y });
+    const { max: newMax } = subtreeExtent(bRoot);
+    cursor = newMax + baseDistance * 1.5;
+    collectFinal(bRoot, result);
   }
 
   return result;
@@ -756,7 +864,7 @@ export default function FamilyTree() {
     [treeData, collapsedIds]
   );
 
-  /* التخطيط الذكي مع منع العرض الأفقي المفرط والدفع للأعلى */
+  // التخطيط بدون تطبيق CanopySilhouette
   const organicLayout = useMemo(() => {
     return computeOrganicLayout(visibleData, {
       levelHeight: 160,
@@ -775,7 +883,7 @@ export default function FamilyTree() {
     setTranslate(fit.translate);
   }, [dimensions, organicLayout, treeKey]);
 
-  /* رسم المسارات الموصلة الأنيقة المائلة بين الأبناء والآباء */
+  /* رسم المسارات */
   const linkPaths = useMemo(() => {
     const paths: { path: string; strokeWidth: number }[] = [];
     const walk = (node: TreeNode, parentId: string | null) => {
