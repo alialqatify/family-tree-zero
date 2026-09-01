@@ -524,31 +524,24 @@ function applyBranchHeightOffset(
   levelHeight: number
 ): Map<string, LayoutPosition> {
   const result = new Map(positions);
-  const maxSafeOffset = levelHeight * 0.4; // سقف أقصى: 40% من المسافة بين الأجيال، يمنع التلامس دايماً
+  const maxSafeOffset = levelHeight * 0.48;
+  const safeAmount = Math.min(Math.max(amount, 0), maxSafeOffset);
 
-  function walk(node: TreeNode, cumulativeOffset: number) {
+  function walk(node: TreeNode, cumulativeOffset: number): void {
     const pos = result.get(node.attributes.id);
     if (pos) {
       result.set(node.attributes.id, { x: pos.x, y: pos.y + cumulativeOffset });
     }
 
-    if (node.children.length >= 2) {
-      const counts = node.children.map((c) => countDescendants(c));
-      const maxCount = Math.max(...counts, 1);
+    if (node.children.length === 0) return;
 
-      node.children.forEach((child, i) => {
-        // وزن الفرع: 0 للفروع الصغيرة جداً، وصولاً لـ1 لأكبر فرع بين الإخوة
-        const weight = counts[i] / maxCount;
-        const jitter = hashToUnit(child.attributes.id);
-        // مزيج: 70% حسب حجم الفرع (الأكبر يرتفع أكثر)، 30% تنويع بسيط لكسر التطابق
-        const factor = weight * 0.7 + jitter * 0.3;
-        const offset = Math.min(amount, maxSafeOffset) * factor;
-        walk(child, cumulativeOffset - offset);
-      });
-    } else {
-      for (const child of node.children) {
-        walk(child, cumulativeOffset);
-      }
+    const counts = node.children.map(countDescendants);
+    const maxCount = Math.max(...counts, 1);
+    for (const [index, child] of node.children.entries()) {
+      const branchRatio = Math.sqrt(counts[index] / maxCount);
+      const naturalVariation = 0.82 + hashToUnit(child.attributes.id) * 0.18;
+      const offset = safeAmount * branchRatio * naturalVariation;
+      walk(child, cumulativeOffset - offset);
     }
   }
 
@@ -667,7 +660,7 @@ export default function FamilyTree() {
   const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
 
   // --- متغيرات التحكم الحي (Tuner) ---
-  const [branchOffset, setBranchOffset] = useState(30);
+  const [branchOffset, setBranchOffset] = useState(58);
   const [showTuner, setShowTuner] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -953,9 +946,12 @@ export default function FamilyTree() {
         const t = organicLayout.get(node.attributes.id);
         if (s && t) {
           const midY = (s.y + t.y) / 2;
+          const curve = (hashToUnit(`${parentId}:${node.attributes.id}`) - 0.5) * 34;
+          const midX1 = s.x + curve;
+          const midX2 = t.x - curve * 0.65;
           paths.push({
-            path: `M${s.x},${s.y} C${s.x},${midY} ${t.x},${midY} ${t.x},${t.y}`,
-            strokeWidth: 2.5,
+            path: `M${s.x},${s.y} C${midX1},${midY} ${midX2},${midY} ${t.x},${t.y}`,
+            strokeWidth: Math.min(14, 2.5 + Math.sqrt(countDescendants(node)) * 0.75),
           });
         }
       }
@@ -1182,6 +1178,7 @@ export default function FamilyTree() {
       return (
         <g
           data-person-id={id}
+          transform={`rotate(${(hashToUnit(id) - 0.5) * 14})`}
           style={{ cursor: 'pointer' }}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
@@ -1754,6 +1751,7 @@ export default function FamilyTree() {
               onClick={() => setHighlightId(null)}
             >
               <g transform={`translate(${translate.x},${translate.y}) scale(${zoom})`}>
+                <g transform="scale(0.8, 1)">
                 {linkPaths.map((l, i) => (
                   <path
                     key={i}
@@ -1774,6 +1772,7 @@ export default function FamilyTree() {
                     </g>
                   );
                 })}
+                </g>
               </g>
             </svg>
 
